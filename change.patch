@@ -1,0 +1,331 @@
+diff --git a/README.md b/README.md
+index f02f014..5a9e0fe 100644
+--- a/README.md
++++ b/README.md
+@@ -2,14 +2,106 @@
+ 
+ **An agentic home-loan underwriting system.** Applicants submit their KYC, income, and collateral documents through a web app; a multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline running on **AWS Bedrock (Amazon Nova Pro)** classifies and reads the documents, verifies each fact against external registries, computes the lending math (EMI / LTV / FOIR), reaches an **approve / conditional / decline** decision, and emails the applicant a PDF decision report. Borderline cases are **parked for a human underwriter**, who approves or declines them from an admin console — and the applicant's dashboard updates with the final verdict.
+ 
++> **Note:** This README documents a complete system. The current repository contains the documentation and design specs; the implementation code (backend, frontend, agent pipeline) resides in a separate deployment environment. See the setup guide below for deploying a complete installation.
++
+ > Looking for the implementation-level story — the exact mechanisms, data shapes, and the *why* behind every design choice? See **[docs/PROJECT_DEEP_DIVE.md](docs/PROJECT_DEEP_DIVE.md)**.
+ 
+ ---
+ 
++## Quick Summary
++
++**In 30 seconds:** A fully automated home-loan approval system. Applicants upload documents, AI agents verify them instantly, and get an approved/conditional/declined decision within minutes. Borderline cases automatically escalate to a human underwriter.
++
++---
++
++## Quick Start
++
++Get a complete installation running in ~10 minutes. (This section assumes you have the full codebase with `backend/`, `frontend/`, and `agent_flow/` directories. If you're in this repository without those directories, see the [Setup & installation](#setup--installation) section for detailed instructions.)
++
++### Minimum prerequisites
++- **Python 3.11+**
++- **Node.js 18+** + npm
++- **AWS account** with:
++  - Bedrock access (Amazon Nova Pro model enabled)
++  - S3 bucket
++  - DynamoDB table
++  - SES verified sender email
++
++### Setup (5 minutes)
++
++```bash
++# 1. Clone and set up Python
++git clone <repo-url> HomeLoanAgent && cd HomeLoanAgent
++python -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
++pip install -r requirements.txt
++
++# 2. Configure AWS
++aws configure  # or set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION=us-east-1
++
++# 3. Update the three constants in backend/server.py (see Configuration section):
++#    S3_BUCKET, DDB_TABLE, SES_SENDER
++
++# 4. Set up frontend
++cd frontend && npm install && cp .env.example .env
++```
++
++### Run (2 minutes)
++
++**Terminal 1 — Backend:**
++```bash
++cd backend
++uvicorn server:app --reload --host 127.0.0.1 --port 8000
++```
++
++**Terminal 2 — Frontend:**
++```bash
++cd frontend
++npm run dev
++```
++
++**Then:** Open **http://localhost:5173**, register an account (first user is admin), and submit a test application. Check the admin console to manually approve borderline cases.
++
++---
++
++## User Journeys
++
++### An applicant's journey
++1. Opens the app and **registers** (creates login credentials)
++2. Clicks **"Start application"** and uploads three documents:
++   - Identity (Aadhaar/PAN)
++   - Income (payslip, bank statement, or tax return)
++   - Collateral (property deed or valuation report)
++3. The system **auto-classifies** each upload (rejects mismatched types)
++4. Enters the application form (loan amount, tenure, property value, etc.)
++5. Clicks **Submit** — and immediately sees **"Your application is being reviewed"**
++6. Waits **2–5 minutes**; the AI agents finish verification → the dashboard updates with:
++   - ✅ **Approved** — funds ready, EMI disclosed
++   - ⏳ **Under Review** — a human underwriter will decide (email notification sent)
++   - ❌ **Declined** — reason explained, next steps (if any)
++7. Receives a **PDF decision report** by email with all details
++
++### An underwriter's journey (for conditional cases)
++1. Notices in the admin console a metric tile: **"5 applications under review"**
++2. Clicks to see the list, selects a case, and sees:
++   - Applicant details (name, income, existing loans)
++   - All extracted facts (which the AI agent verified)
++   - Why the case was escalated (e.g., "FOIR at 50%, borderline")
++   - **1-hour presigned links** to original documents in S3
++3. Reviews documents, then either:
++   - **Approves** — case closes, applicant emails a congratulatory letter
++   - **Declines** — case closes, applicant is notified with a reason
++4. Returns to the dashboard; the case no longer appears under "Under review"
++
++---
++
+ ## Table of contents
+ 
++- [Quick Summary](#quick-summary)
++- [Quick Start](#quick-start)
++- [User Journeys](#user-journeys)
+ - [What it does](#what-it-does)
+ - [Architecture](#architecture)
++- [Architecture for non-architects](#architecture-for-non-architects)
+ - [The agentic pipeline](#the-agentic-pipeline)
+ - [Decision logic](#decision-logic)
+ - [Human-in-the-loop review](#human-in-the-loop-review)
+@@ -18,12 +110,14 @@
+ - [Prerequisites](#prerequisites)
+ - [Setup & installation](#setup--installation)
+ - [Configuration](#configuration)
++- [Troubleshooting](#troubleshooting)
+ - [Running the system](#running-the-system)
+ - [HTTP API reference](#http-api-reference)
+ - [Data model](#data-model)
+ - [Mock verification APIs](#mock-verification-apis)
+ - [Security notes](#security-notes)
+ - [Known limitations & assumptions](#known-limitations--assumptions)
++- [Glossary](#glossary)
+ - [Roadmap](#roadmap)
+ 
+ ---
+@@ -46,6 +140,25 @@
+ 
+ ## Architecture
+ 
++### Architecture for non-architects
++
++The system has **three main parts**:
++
++1. **Frontend (React web app)** — applicants and underwriters see a login screen, a document upload form, and a dashboard showing application status. It talks to the backend via simple HTTP requests.
++
++2. **Backend (FastAPI server)** — handles login, stores uploaded documents, kicks off the AI agents to process an application, and lets underwriters manually approve borderline cases. It's the middleman between the web app and the agents.
++
++3. **Agents (LangGraph "brain")** — this is where the magic happens. AI agents read uploaded documents, cross-check facts against registries (Aadhaar/income/property databases), do the lending math, and decide whether to approve/decline the loan. If they're unsure, they flag it for a human.
++
++**Why this design?** We separate concerns so:
++- The web app can be rebuilt without touching the agent logic.
++- The agents can be tested independently with mock documents.
++- Decisions are deterministic where it matters (lending math) and only uses AI where judgment helps (document reading, fact verification).
++
++---
++
++### System diagram
++
+ The project is three cooperating parts plus a persistence layer.
+ 
+ ```
+@@ -279,29 +392,124 @@ cp .env.example .env               # set VITE_API_BASE if the backend isn't on :
+ 
+ ## Configuration
+ 
++> **Note:** This section applies when you have the full codebase. If the `backend/`, `frontend/`, or `agent_flow/` directories are absent, you need to obtain the implementation files before configuring.
++
+ ### Backend — edit constants in [`backend/server.py`](backend/server.py)
+ 
+-| Constant | Purpose |
+-| --- | --- |
+-| `S3_BUCKET` | Bucket where uploaded documents are stored (`applications/{id}/{slot}/...`). |
+-| `DDB_TABLE` | DynamoDB table for application records. |
+-| `SES_SENDER` / `SES_REGION` | Verified SES sender address and region. |
++| Constant | Required | Purpose |
++| --- | --- | --- |
++| `S3_BUCKET` | **Production only** | Bucket where uploaded documents are stored (`applications/{id}/{slot}/...`). |
++| `DDB_TABLE` | **Production only** | DynamoDB table for application records. |
++| `SES_SENDER` / `SES_REGION` | **Production only** | Verified SES sender address and region. |
++
++> ⚠️ **What breaks if you skip it:** If you don't set these, document upload and email delivery will fail. Locally, you can use the mock `LocalStorage` adapter in `agent_flow/` instead.
+ 
+ ### Backend — environment variables
+ 
+-| Variable | Default | Purpose |
+-| --- | --- | --- |
+-| `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000` | Comma-separated allowed frontend origins. |
+-| `JWT_SECRET_KEY` | auto-generated to `jwt_secret.txt` | Secret for signing JWTs. **Set this explicitly in production.** |
+-| `LOG_LEVEL` | `INFO` | Python logging level. |
+-| `REVIEWER_EMAIL` | — | Recipient for manual-review (conditional) notifications. Without it, reviewer emails are skipped and logged. |
+-| `S3_BUCKET` | — | Used by the email node to build presigned document links for the reviewer packet. |
++| Variable | Default | Priority | Purpose |
++| --- | --- | --- | --- |
++| `CORS_ORIGINS` | `http://localhost:5173,...` | Dev-optional | Comma-separated allowed frontend origins. |
++| `JWT_SECRET_KEY` | auto-generated to `jwt_secret.txt` | **Production-required** | Secret for signing JWTs. **Explicitly set in production.** ⚠️ The auto-generated version is not secret. |
++| `LOG_LEVEL` | `INFO` | Dev-optional | Python logging level. |
++| `REVIEWER_EMAIL` | — | Feature-gated | Recipient for manual-review (conditional) notifications. Without it, reviewer emails are skipped and logged. |
+ 
+ ### Frontend — [`frontend/.env`](frontend/.env.example)
+ 
+ | Variable | Default | Purpose |
+ | --- | --- | --- |
+-| `VITE_API_BASE` | `http://localhost:8000` | Base URL of the FastAPI backend. |
++| `VITE_API_BASE` | `http://localhost:8000` | Base URL of the FastAPI backend. Change if the backend runs elsewhere. |
++
++### Configuration checklist
++
++Before deploying to production, verify:
++
++- [ ] **S3_BUCKET** is set to your own bucket (not a default)
++- [ ] **DDB_TABLE** points to a DynamoDB table with `application_id` as the partition key
++- [ ] **SES_SENDER** is a verified sender in AWS SES
++- [ ] **JWT_SECRET_KEY** is explicitly set (not auto-generated) — save it securely
++- [ ] **REVIEWER_EMAIL** is configured if you want manual-review notifications
++- [ ] **CORS_ORIGINS** restricts to your frontend domain(s)
++- [ ] Bedrock model **amazon.nova-pro-v1:0** is enabled in your AWS account
++- [ ] AWS credentials are set (via `aws configure` or environment variables)
++
++---
++
++## Troubleshooting
++
++> **Note:** This section applies to troubleshooting a running deployment. If the system is not yet running (missing backend/frontend code), see the [Setup & installation](#setup--installation) section to complete the initial setup.
++
++### Common errors and solutions
++
++#### "Bedrock model not found" / "model ... is not available"
++**Cause:** The `amazon.nova-pro-v1:0` model is not enabled in your AWS account.
++**Fix:**
++1. Go to the [AWS Bedrock console](https://console.aws.amazon.com/bedrock) → **Model access** (left sidebar)
++2. Click **Manage model access** and enable **Amazon Nova Pro**
++3. Wait a few minutes for activation, then retry
++
++#### "NoCredentialsError" / "Unable to locate credentials"
++**Cause:** AWS credentials are not configured.
++**Fix:**
++```bash
++aws configure  # Enter your access key, secret key, region (us-east-1), output format
++# Or set environment variables:
++export AWS_ACCESS_KEY_ID=your_key
++export AWS_SECRET_ACCESS_KEY=your_secret
++export AWS_DEFAULT_REGION=us-east-1
++```
++
++#### "S3 403 Forbidden" / "Access Denied"
++**Cause:** The S3 bucket exists but your IAM user lacks `s3:GetObject` / `s3:PutObject` permissions.
++**Fix:**
++1. Go to IAM → your user → **Add permissions**
++2. Attach the **AmazonS3FullAccess** policy (or create a custom policy restricting to your bucket)
++
++#### "DynamoDB table not found" / "Requested resource not found"
++**Cause:** The table doesn't exist, or the name in `backend/server.py` is wrong.
++**Fix:**
++1. Go to the [DynamoDB console](https://console.aws.amazon.com/dynamodb)
++2. Create a table with:
++   - **Table name:** matches `DDB_TABLE` in `server.py`
++   - **Partition key:** `application_id` (String)
++   - **Billing:** On-demand (or provisioned 10 RCU / 10 WCU for development)
++3. Wait for the table to be active, then retry
++
++#### "JWT token expired" on every request
++**Cause:** The `JWT_SECRET_KEY` changed between requests (common if using the auto-generated version).
++**Fix:**
++1. Save the `jwt_secret.txt` file (or set `JWT_SECRET_KEY` explicitly in `.env`)
++2. Clear browser cookies and log in again
++
++#### Documents won't upload / "Unsupported file type"
++**Cause:** The document type classification failed, or the document is in an unsupported format.
++**Fix:**
++- Supported formats: **PDF**, **PNG**, **JPG**, **DOCX**
++- Ensure the document matches the slot:
++  - **Identity slot:** Aadhaar or PAN (ID cards)
++  - **Income slot:** Payslip, bank statement, or tax return
++  - **Collateral slot:** Property deed or valuation report
++- Resave the document as PDF if it's been corrupted
++
++#### Application stuck in "processing"
++**Cause:** The background agent job is still running, or crashed without updating the status.
++**Fix:**
++1. Wait 2–5 minutes (agents can take time on first run)
++2. Check the backend logs for errors (in Terminal 1):
++   ```bash
++   # Look for ERROR or exception messages
++   grep -i "error\|exception" <output>
++   ```
++3. If still stuck, check that:
++   - The Bedrock model is enabled
++   - DynamoDB has write permissions
++   - AWS credentials are valid
++
++#### "ModuleNotFoundError: No module named 'langgraph'"
++**Cause:** Dependencies not installed.
++**Fix:**
++```bash
++pip install -r requirements.txt
++```
+ 
+ ---
+ 
+@@ -435,6 +643,40 @@ From [`assumptions.txt`](assumptions.txt) and [`todo.txt`](todo.txt):
+ 
+ ---
+ 
++## Glossary
++
++### Lending & finance
++- **EMI** — Equated Monthly Installment. The fixed monthly payment on a loan. Formula: `EMI = (Principal × Rate × Years) / (Total Months)`.
++- **LTV** — Loan-to-Value. The ratio of the loan amount to the property value. Capped at **80%** in this system (we finance at most 80% of what the property is worth).
++- **FOIR** — Family Obligation Ratio. The percentage of the applicant's monthly income spent on debt. Calculated as: `(existing EMIs + new loan EMI) / net monthly income`. Higher FOIR = higher risk. Thresholds:
++  - ≤45% → auto-approved
++  - 45–55% → escalated to human underwriter
++  - >55% → auto-declined
++- **Sanctioned amount** — the principal the bank actually offers (capped by LTV), distinct from the amount the applicant requested.
++- **Existing EMIs** — the applicant's current loan payments (from their income registry record), used to compute a realistic FOIR.
++
++### Application decisions
++- **Approved** — auto-granted, no human review needed.
++- **Conditional** — borderline decision, waiting for manual underwriter review.
++- **Declined** — rejected, applicant receives an explanation.
++- **Incomplete** — processing failed (missing data, parsing errors, etc.); applicant is asked to resubmit.
++- **Processing** — application is in the agent pipeline; check back soon.
++- **Failed** — a system error occurred (check backend logs).
++
++### Technical terms
++- **LangGraph** — a framework for building agent workflows as state machines. Each "node" is a task (parse, verify, decide), and "edges" determine which node runs next based on the state.
++- **Agent** — an autonomous component that uses an LLM to make decisions or take actions. In this system, agents read documents, verify facts, and recommend lending decisions.
++- **Forced tool use** — instructing an LLM: "you must call one of these tools." Ensures structured output (no hallucination).
++- **Async** — asynchronous processing. The backend accepts an application, returns immediately, and processes it in the background. Applicants poll for updates.
++- **Presigned URL** — a temporary, cryptographically signed link to a file in S3 that expires after a set time (1 hour in this system). Used to share reviewer documents securely.
++
++### Document types
++- **Identity:** Aadhaar (12-digit unique ID), PAN (tax ID, format: 5 letters + 4 digits + 1 letter).
++- **Income:** Recent payslip, bank statement, or income tax return (ITR).
++- **Collateral:** Property deed, valuation report, or sale agreement.
++
++---
++
+ ## Roadmap
+ 
+ Planned improvements (see [`todo.txt`](todo.txt)):
