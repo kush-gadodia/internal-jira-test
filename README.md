@@ -26,8 +26,8 @@
 - [Mock verification APIs](#mock-verification-apis)
 - [Security notes](#security-notes)
 - [Known limitations & assumptions](#known-limitations--assumptions)
-- [Glossary](#glossary)
 - [Roadmap](#roadmap)
+- [Glossary](#glossary)
 
 ---
 
