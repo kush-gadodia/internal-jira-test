@@ -240,6 +240,28 @@ jobs:
             -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
             -d '{"kind":"status","status":"awaiting_approval"}'
 
+      # Last-resort report so a failed step never leaves the run stuck in
+      # Plane with no error and no bot reply -- this is the "guaranteed final
+      # callback" the run contract needs. `if: failure()` catches any earlier
+      # `run:` step exiting non-zero (what actually happened the first time
+      # this workflow was tested: `gh pr create` failing because the repo
+      # didn't have "Allow GitHub Actions to create and approve pull
+      # requests" enabled yet). It does NOT catch a hard job cancellation,
+      # timeout, or runner crash -- a real trap wired into every step's shell
+      # would, at real added complexity; out of scope for this reference file.
+      - name: Report failure
+        if: failure()
+        run: |
+          if [ -f contract.json ]; then
+            callback_url=$(jq -r .callback.url contract.json)
+            callback_token=$(jq -r .callback.token contract.json)
+            run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -sf -X POST "$callback_url" \
+              -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg step "plan" --arg msg "The plan job failed. See the Actions run for the full log: $run_url" \
+                '{kind:"error", step:$step, message:$msg}')" || true
+          fi
+
       - name: Stop heartbeat loop
         if: always()
         run: kill "$(cat heartbeat.pid)" 2>/dev/null || true
@@ -286,7 +308,18 @@ jobs:
           title=$(jq -r .ticket.title contract.json)
           slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60)
           branch="feat/${identifier}-${slug}"
-          git checkout -b "$branch"
+          # The branch name is deterministic from the ticket, so a retried
+          # implement job (a re-run, or a second mention on the same ticket)
+          # can find this branch already on the remote from a previous
+          # attempt. Continue from its tip instead of branching fresh from
+          # the checkout ref -- a fresh branch shares no history with that
+          # remote branch, so the push below would always be rejected as a
+          # non-fast-forward (confirmed by hitting exactly that in testing).
+          if git fetch origin "$branch" 2>/dev/null; then
+            git checkout -b "$branch" "origin/$branch"
+          else
+            git checkout -b "$branch"
+          fi
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2 # TODO: pin to a commit SHA -- gstack's ./setup requires Bun v1.0+
@@ -329,13 +362,20 @@ jobs:
           git config user.name "gstack-agent"
           git config user.email "gstack-agent@users.noreply.github.com"
           git add -A
-          git commit -m "gstack: initial checkpoint"
+          # Nothing to commit is a legitimate outcome when resuming a branch
+          # that a previous attempt already pushed this exact checkpoint to.
+          git diff --cached --quiet || git commit -m "gstack: initial checkpoint"
           git push -u origin "${{ steps.branch.outputs.branch }}"
           identifier=$(jq -r .ticket.identifier contract.json)
           title=$(jq -r .ticket.title contract.json)
-          pr_url=$(gh pr create --draft --title "${identifier}: ${title}" \
-            --body "Opened automatically by gstack for ${identifier}. More commits are on the way." \
-            --head "${{ steps.branch.outputs.branch }}")
+          # Idempotent: a previous attempt may have already opened the PR for
+          # this branch, in which case `gh pr create` would fail outright.
+          pr_url=$(gh pr view "${{ steps.branch.outputs.branch }}" --json url -q .url 2>/dev/null || true)
+          if [ -z "$pr_url" ]; then
+            pr_url=$(gh pr create --draft --title "${identifier}: ${title}" \
+              --body "Opened automatically by gstack for ${identifier}. More commits are on the way." \
+              --head "${{ steps.branch.outputs.branch }}")
+          fi
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
 
       - name: Report the draft PR
@@ -377,6 +417,21 @@ jobs:
             -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
             -d '{"kind":"status","status":"pr_opened"}'
 
+      # See the identical step in the `plan` job above for why this exists and
+      # what it does not cover.
+      - name: Report failure
+        if: failure()
+        run: |
+          if [ -f contract.json ]; then
+            callback_url=$(jq -r .callback.url contract.json)
+            callback_token=$(jq -r .callback.token contract.json)
+            run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -sf -X POST "$callback_url" \
+              -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg step "implement" --arg msg "The implement job failed. See the Actions run for the full log: $run_url" \
+                '{kind:"error", step:$step, message:$msg}')" || true
+          fi
+
       - name: Stop heartbeat loop
         if: always()
         run: kill "$(cat heartbeat.pid)" 2>/dev/null || true
@@ -404,6 +459,15 @@ jobs:
 # authentication is entirely via the OIDC exchange in the `claim` job.
 #
 # Also required, outside this file:
+#   - Settings > Actions > General > Workflow permissions: "Allow GitHub
+#     Actions to create and approve pull requests" must be checked. This is
+#     separate from (and not overridable by) this file's own
+#     `permissions: pull-requests: write` -- that YAML block only narrows
+#     what's allowed within what this repo-level toggle permits; with it
+#     off, `gh pr create`/`gh pr ready` fail with "GitHub Actions is not
+#     permitted to create or approve pull requests" regardless of the
+#     workflow's own permissions. Confirmed by hitting this exact failure
+#     in real end-to-end testing.
 #   - This workflow must be committed to the repository's DEFAULT branch --
 #     repository_dispatch will not run a workflow that only exists on
 #     another branch.
