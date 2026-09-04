@@ -1,6 +1,8 @@
 # 🏠 HomeLoanAgent
 
-**An agentic home-loan underwriting system.** Applicants submit their KYC, income, and collateral documents through a web app; a multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline running on **AWS Bedrock (Amazon Nova Pro)** classifies and reads the documents, verifies each fact against external registries, computes the lending math (EMI / LTV / FOIR), reaches an **approve / conditional / decline** decision, and emails the applicant a PDF decision report. Borderline cases are **parked for a human underwriter**, who approves or declines them from an admin console — and the applicant's dashboard updates with the final verdict.
+**An agentic home-loan underwriting system for the Indian market.** Applicants submit their KYC, income, and collateral documents through a web app; a multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline running on **AWS Bedrock (Amazon Nova Pro)** classifies and reads the documents, verifies each fact against external registries, computes the lending math (EMI / LTV / FOIR), reaches an **approve / conditional / decline** decision, and emails the applicant a PDF decision report. Borderline cases are **parked for a human underwriter**, who approves or declines them from an admin console — and the applicant's dashboard updates with the final verdict.
+
+> **India scope:** built for the Indian home-loan market — amounts in **INR (₹)** with **lakh/crore** numbering (`en-IN`), **Aadhaar/PAN** KYC, salary/income proofs (**payslip, bank statement, Form-16/ITR**) and property proofs (**Registered Sale Deed / valuation report / Agreement to Sell + Encumbrance Certificate (EC)**), and checks aligned with **RBI** guidance, **CIBIL/bureau** practice, **PMLA-KYC** norms, and the **DPDP Act 2023**. All rates and thresholds below are configurable examples, not regulatory prescriptions.
 
 > Looking for the implementation-level story — the exact mechanisms, data shapes, and the *why* behind every design choice? See **[docs/PROJECT_DEEP_DIVE.md](docs/PROJECT_DEEP_DIVE.md)**.
 
@@ -25,6 +27,7 @@
 - [Security notes](#security-notes)
 - [Known limitations & assumptions](#known-limitations--assumptions)
 - [Roadmap](#roadmap)
+- [Glossary](#glossary)
 
 ---
 
@@ -32,14 +35,14 @@
 
 | Capability | Detail |
 | --- | --- |
-| **Document intake** | Upload identity (Aadhaar/PAN), income (payslip/bank statement/Form-16/ITR), and collateral (property deed/valuation report/sale agreement) documents. |
+| **Document intake** | Upload identity (Aadhaar — 12 digits / PAN — `ABCDE1234F` format), income (salary slip / bank statement / Form-16 / ITR), and collateral (Registered Sale Deed / valuation report / Agreement to Sell + Encumbrance Certificate (EC)) documents. |
 | **Type gating** | Every upload is classified by an LLM at intake — an unexpected document type (e.g. a payslip in the identity slot) is rejected before it is ever stored. |
 | **Structured extraction** | Bedrock reads each document and extracts typed fields (ID number, DOB, monthly income, property value, …). |
 | **Fact verification** | Extracted facts are cross-checked against mock government/employer/property registries via tool-calling agents (Aadhaar/PAN/DOB; income, employer & existing EMIs; property title & valuation). |
-| **Lending math** | Deterministic EMI, sanctioned amount (LTV-capped), and FOIR are computed in code — the LLM never invents a figure. |
+| **Lending math** | Deterministic EMI (in ₹), sanctioned amount (LTV-capped; amounts shown in lakh/crore), and FOIR are computed in code — the LLM never invents a figure. |
 | **Risk decision** | An LLM makes the call within hard FOIR guardrails: **approved**, **conditional** (parked for human review), or **declined**. |
 | **Human-in-the-loop** | **Conditional** applications wait for an underwriter, who **approves or declines** them from the admin console; the verdict flows back to the applicant. |
-| **Communications** | Generates and emails a PDF decision report to the applicant (AWS SES); for conditional cases, also emails a human reviewer a packet with presigned document links. |
+| **Communications** | Generates and emails a PDF decision report to the applicant (AWS SES); for conditional cases, also emails a human reviewer a packet with presigned document links. Timestamps in IST (Asia/Kolkata); phone numbers in +91 format with PIN-code addresses. |
 | **Web app** | JWT-authenticated React SPA with an applicant dashboard (apply, track status) and an admin console (all applications, metrics, manual approve/decline). |
 
 ---
@@ -80,6 +83,8 @@ The project is three cooperating parts plus a persistence layer.
 - **`backend/`** — a FastAPI app that handles auth, document upload/classification, kicks off the graph **asynchronously** (FastAPI `BackgroundTasks`), persists results, and lets an admin resolve applications parked for manual review.
 - **`frontend/`** — a React + TypeScript SPA (see its own [README](frontend/README.md)).
 - **`legacy-frontend/`** — the original static HTML/JS prototype, kept for reference (superseded by `frontend/`).
+
+> **AWS region:** deploy the data plane (S3, DynamoDB, SES) in **`ap-south-1` (Mumbai)** for data residency and low latency for Indian PII. Run Bedrock inference in the closest region that supports the required model (e.g. Amazon Nova Pro); if Nova Pro is unavailable in `ap-south-1`, keep applicant data in `ap-south-1` and call Bedrock in the nearest supported region.
 
 ---
 
@@ -136,14 +141,14 @@ All thresholds live as named constants next to the code that enforces them.
 
 **Lending math** — [`aggregate_agent.py`](agent_flow/agents/doc_verification/aggregate_agent.py):
 
-| Constant | Value | Meaning |
+| Constant | Value | Context (India) |
 | --- | --- | --- |
-| `ANNUAL_INTEREST_RATE` | `8.5%` | Rate used for the EMI calculation. |
-| `MAX_LTV` | `0.80` | Bank finances at most 80% of the verified property value. |
-| Sanctioned amount | `min(requested, MAX_LTV × property_value)` | The principal actually offered. |
-| EMI | standard amortization formula | Over the requested tenure. |
+| `ANNUAL_INTEREST_RATE` | `8.5%` | Example rate only; Indian home-loan rates vary by lender, loan slab, and CIBIL score — configurable. |
+| `MAX_LTV` | `0.80` | Simplified cap: bank finances at most 80% of the verified property value. RBI's slab-wise caps differ by loan size (e.g. smaller loans up to 90%, larger loans down to 75%) — configure per current RBI guidance. |
+| Sanctioned amount | `min(requested, MAX_LTV × property_value)` | The principal actually offered (in ₹). |
+| EMI | standard amortization formula | Monthly EMI in ₹, over the requested tenure. |
 
-**Risk / FOIR bands** — [`risk_agent.py`](agent_flow/agents/doc_verification/risk_agent.py). **FOIR = (existing EMIs + proposed EMI) / net monthly income**, where the existing EMIs come from the income registry's `existing_obligations` (defaults to 0 if the registry reports none):
+**Risk / FOIR bands** — [`risk_agent.py`](agent_flow/agents/doc_verification/risk_agent.py). **FOIR = (existing EMIs + proposed EMI) / net monthly income** (Fixed Obligation to Income Ratio, also called Family FOIR by Indian lenders), where the existing EMIs come from the income registry's `existing_obligations` (defaults to 0 if the registry reports none). In production the existing-EMI input would come from a CIBIL/bureau pull; the bands below are configurable guardrails, not RBI mandates:
 
 | FOIR | Outcome |
 | --- | --- |
@@ -153,7 +158,7 @@ All thresholds live as named constants next to the code that enforces them.
 
 The LLM proposes the decision; a deterministic guardrail then clamps it toward the safer outcome (approved → conditional → declined) so a rare model drift can never over-approve. The model may also *tighten* the call based on collateral flags (a flood-zone flag, an encumbrance, …).
 
-**Eligibility checks** — [`identity_tools.py`](agent_flow/tools/identity_verification_tools/identity_tools.py): applicant must be **≥ 18**, and **age + loan term ≤ 60 years**.
+**Eligibility checks** — [`identity_tools.py`](agent_flow/tools/identity_verification_tools/identity_tools.py): applicant must be **≥ 18**, and **age + loan term ≤ 60 years** (60 = typical Indian superannuation/retirement age; actual lender limits vary by employment type — configure per policy).
 
 ---
 
@@ -182,7 +187,8 @@ For conditional cases, the pipeline also emails the configured `REVIEWER_EMAIL` 
 | **Auth store** | SQLite via SQLAlchemy (`users.db`) |
 | **Document store** | AWS S3 |
 | **Application store** | AWS DynamoDB |
-| **Email** | AWS SES (raw MIME with PDF attachment) |
+| **Email** | AWS SES in `ap-south-1` (raw MIME with PDF attachment) |
+| **Currency / locale** | INR (₹), `en-IN` lakh/crore numbering, Asia/Kolkata (IST) |
 | **PDF** | reportlab (platypus) |
 | **Doc type sniffing** | `filetype` |
 | **Frontend** | React 19 + TypeScript + Vite + Tailwind CSS v4 + React Router v7 |
@@ -237,10 +243,10 @@ HomeLoanAgent/
 - **Python 3.11+** (the codebase uses `typing.NotRequired`; developed against 3.14).
 - **Node.js 18+** and npm (for the frontend).
 - **An AWS account** with credentials configured (`aws configure` or environment variables) and access to:
-  - **Bedrock** in `us-east-1` with the `amazon.nova-pro-v1:0` model enabled.
-  - **S3** — a bucket for uploaded documents.
-  - **DynamoDB** — a table for applications (partition key `application_id`, String).
-  - **SES** — a verified sender identity (and verified recipients while in the SES sandbox).
+  - **Bedrock** with the `amazon.nova-pro-v1:0` model enabled (see region note in [Architecture](#architecture) — keep data in `ap-south-1`).
+  - **S3** — a bucket for uploaded documents (create in `ap-south-1`).
+  - **DynamoDB** — a table for applications in `ap-south-1` (partition key `application_id`, String).
+  - **SES** — a verified sender identity in `ap-south-1` (and verified recipients while in the SES sandbox; sender should be an Indian business domain).
 
 > The backend currently hard-codes the S3 bucket, DynamoDB table, and SES sender in [`backend/server.py`](backend/server.py). Update those constants to match your own AWS resources (see [Configuration](#configuration)).
 
@@ -262,10 +268,10 @@ pip install -r requirements.txt
 ### 2. AWS credentials
 
 ```bash
-aws configure                      # or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION=us-east-1
+aws configure                      # or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION=ap-south-1
 ```
 
-Make sure Bedrock model access for **Amazon Nova Pro** is granted in the Bedrock console (Model access), and that your S3 bucket, DynamoDB table, and SES sender exist.
+Make sure Bedrock model access for **Amazon Nova Pro** is granted in the Bedrock console (Model access), and that your S3 bucket, DynamoDB table, and SES sender exist in **`ap-south-1` (Mumbai)**.
 
 ### 3. Frontend
 
@@ -281,11 +287,11 @@ cp .env.example .env               # set VITE_API_BASE if the backend isn't on :
 
 ### Backend — edit constants in [`backend/server.py`](backend/server.py)
 
-| Constant | Purpose |
-| --- | --- |
-| `S3_BUCKET` | Bucket where uploaded documents are stored (`applications/{id}/{slot}/...`). |
-| `DDB_TABLE` | DynamoDB table for application records. |
-| `SES_SENDER` / `SES_REGION` | Verified SES sender address and region. |
+| Constant | Purpose | Example (India) |
+| --- | --- | --- |
+| `S3_BUCKET` | Bucket where uploaded documents are stored (`applications/{id}/{slot}/...`). | Created in `ap-south-1`, e.g. `homeloan-docs-prod-ap-south-1`. |
+| `DDB_TABLE` | DynamoDB table for application records. | Table in `ap-south-1`, e.g. `homeloan-applications`. |
+| `SES_SENDER` / `SES_REGION` | Verified SES sender address and region. | Indian business domain sender, e.g. `noreply@example.in`; region `ap-south-1`. |
 
 ### Backend — environment variables
 
@@ -302,6 +308,8 @@ cp .env.example .env               # set VITE_API_BASE if the backend isn't on :
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `VITE_API_BASE` | `http://localhost:8000` | Base URL of the FastAPI backend. |
+
+> **Locale notes:** timestamps are recorded/displayed in IST (Asia/Kolkata); applicant phone numbers use the +91 format and addresses carry a 6-digit PIN code.
 
 ---
 
@@ -375,15 +383,15 @@ All application endpoints require an `Authorization: Bearer <token>` header obta
   "form": { /* full submitted application form */ },
   "checks": {                        // per-agent verdicts (empty until the graph finishes)
     "identity":   { "status": "passed", "reason": "…" },
-    "income":     { "status": "passed", "monthly_income": 120000, "existing_emi": 0 },
-    "collateral": { "status": "passed", "value": 13000000, "property_flags": [] },
-    "aggregate":  { "status": "passed", "proposed_emi": …, "sanctioned_amount": … },
+    "income":     { "status": "passed", "monthly_income": 120000, "existing_emi": 0 },   // ₹1.2 lakh/month
+    "collateral": { "status": "passed", "value": 13000000, "property_flags": [] },        // ₹1.3 cr
+    "aggregate":  { "status": "passed", "proposed_emi": 89750, "sanctioned_amount": 10400000 },  // EMI ≈ ₹89,750/month; sanctioned ≈ ₹1.04 cr
     "risk":       { "decision": "approved", "score": 32.1, "reason": "…" }
   },
   "frontend_response": { /* decision, passed[], failed[], message, next_steps[], EMI/amounts */ },
 
   // present only after a human resolves a conditional application:
-  "reviewed_by": "admin@example.com",
+  "reviewed_by": "admin@example.in",
   "reviewed_at": 1712349999
 }
 ```
@@ -394,13 +402,13 @@ A `processing` record is written **synchronously** at submit time so the applica
 
 ## Mock verification APIs
 
-Verification tools call external mock registries (stand-ins for real government/employer/property data sources). Swap these URLs for real integrations in production:
+Verification tools call external mock registries (stand-ins for real Indian government/employer/property data sources). Swap these URLs for real integrations in production:
 
-| Check | Endpoint | Matches on |
-| --- | --- | --- |
-| Identity (Aadhaar / PAN / DOB) | `https://…mockapi.io/Users` | ID number → record, then name (and DOB). |
-| Income & employment | `https://…mockapi.io/income_verify` | Applicant name → record, then employer + employment type + monthly income; also returns the applicant's `existing_obligations` (existing EMIs) for FOIR. |
-| Collateral / property | `https://collateral-verify.free.beeceptor.com/data` | Aadhaar/PAN on title deed / sale agreement → owner, then name. |
+| Check | Endpoint (mock) | Matches on | Real-world Indian equivalent |
+| --- | --- | --- | --- |
+| Identity (Aadhaar / PAN / DOB) | `https://…mockapi.io/Users` | ID number → record, then name (and DOB). | UIDAI (Aadhaar) / NSDL / UTIITSL (PAN) + DOB match |
+| Income & employment | `https://…mockapi.io/income_verify` | Applicant name → record, then employer + employment type + monthly income; also returns the applicant's `existing_obligations` (existing EMIs) for FOIR. | Employer HR + salary/bank statements + ITR (Income Tax Dept); existing EMIs via CIBIL / credit bureaus in production |
+| Collateral / property | `https://collateral-verify.free.beeceptor.com/data` | Aadhaar/PAN on title deed / sale agreement → owner, then name. | Sub-Registrar office / Encumbrance Certificate (EC) / state land records (e.g. Khata / 7-12 extract as applicable) + registered valuer report |
 
 Responses are cached in-process for 5 minutes. The mock APIs also apply real format rules (e.g. Aadhaar = 12 digits, PAN = 5 letters + 4 digits + 1 letter, surname-initial checks).
 
@@ -414,6 +422,7 @@ Responses are cached in-process for 5 minutes. The mock APIs also apply real for
 - **Upload hardening**: filenames are sanitized to a safe basename (no path traversal into arbitrary S3 prefixes), only the three known folders are accepted, and every upload is type-classified before storage.
 - **Byte sniffing**: storage adapters ignore the client-declared content type and sniff the real bytes, so a mislabeled file can't slip an unsupported type into the parser.
 - **Data minimization in comms**: applicant-facing emails/PDFs are generated in an isolated LLM call that is only given borrower-safe facts — internal metrics (FOIR, risk score) are never exposed to the applicant.
+- **DPDP Act 2023 & Aadhaar handling**: mask Aadhaar (show only the last 4 digits), retain PII for the minimum period needed, and keep applicant data in `ap-south-1`; presigned reviewer links expire in 1 hour (see IST timestamps in the reviewer packet).
 - **Concurrency-safe manual review**: the admin decision endpoint uses a DynamoDB conditional write so two admins can't both resolve the same application.
 - **Fail-closed** design: missing inputs or agent errors resolve to `incomplete`/`declined`, never a silent approval.
 
@@ -426,9 +435,10 @@ Responses are cached in-process for 5 minutes. The mock APIs also apply real for
 From [`assumptions.txt`](assumptions.txt) and [`todo.txt`](todo.txt):
 
 - Assumes clean, well-parsed documents; there is no robust recovery/feedback loop when extraction is poor (a verification → parsing retry loop is planned).
-- No semantic validation of address/phone beyond what parsing yields.
-- Existing EMIs are read from the income registry's `existing_obligations`; there is no independent bureau/liabilities lookup, so FOIR is only as complete as that record.
-- Property is **not** validated against a land registry, nor is valuation-report authenticity checked — it relies on the mock collateral API.
+- No strict validation of Indian address (PIN code), +91 phone, Aadhaar/PAN checksum, or regional-language documents beyond what parsing yields.
+- Existing EMIs are read from the income registry's `existing_obligations`; there is no independent CIBIL/bureau pull, so FOIR is only as complete as that record.
+- Property is **not** validated against a Sub-Registrar / land registry or EC records, nor is valuation-report authenticity checked — it relies on the mock collateral API.
+- Uses a simplified flat `MAX_LTV 0.80` cap rather than RBI slab-wise LTV limits.
 - Documents with expiry semantics (passport/driving licence) are not specially handled.
 - Employment-status casing can be inconsistent depending on extraction.
 - No dedicated security/regression test suite yet.
@@ -444,10 +454,36 @@ Planned improvements (see [`todo.txt`](todo.txt)):
 - Richer collateral handling (LTV surfaced in UI, collateral-only submissions, dedicated valuation intake).
 - Support submitting **both** Aadhaar and PAN for stronger identity matching.
 - Reduce redundant HTTP calls to the mock APIs.
-- Independent liabilities/bureau lookup to strengthen the FOIR inputs.
+- Independent CIBIL/bureau liabilities lookup to strengthen the FOIR inputs.
+- RBI slab-wise LTV, PIN/+91 strict validation, and regional-language document support.
+
+---
 
 Recently delivered: **human escalation** for conditional cases (admin approve/decline console) and **existing-EMI–aware FOIR**.
 
 ---
 
-*Built with LangGraph + AWS Bedrock (Amazon Nova Pro), FastAPI, and React.*
+## Glossary
+
+Indian home-lending terms as used in this repo:
+
+- **EMI** — Equated Monthly Instalment, in ₹. The fixed monthly loan payment.
+- **LTV** — Loan-to-Value: `loan amount / verified property value`. Demo cap is 80%; RBI slab-wise caps vary by loan size.
+- **FOIR** — Fixed (Family) Obligation to Income Ratio: `(existing EMIs + proposed EMI) / net monthly income`. Guardrails here: ≤45% approve, 45–55% conditional, >55% decline (configurable).
+- **Aadhaar** — 12-digit UIDAI identity number (mask: show last 4 digits only).
+- **PAN** — 10-character tax ID (`5 letters + 4 digits + 1 letter`), issued via NSDL/UTIITSL.
+- **Form-16** — employer-issued annual salary/TDS certificate used as income proof.
+- **ITR** — Income Tax Return filed with the Income Tax Department, used as income proof.
+- **EC** — Encumbrance Certificate from the Sub-Registrar: lists registered transactions/charges on a property.
+- **CIBIL** — Credit Information Bureau (India) Ltd; credit score/report used for existing-EMI and credit-history checks in production.
+- **RBI** — Reserve Bank of India; sets home-loan LTV and related lending guidance.
+- **DPDP** — Digital Personal Data Protection Act, 2023: India's data-privacy law (consent, minimization, retention limits).
+- **PMLA-KYC** — Know-Your-Customer norms under the Prevention of Money Laundering Act, applied to borrower identity verification.
+- **lakh / crore** — Indian numbering: 1 lakh = ₹1,00,000; 1 crore = ₹1,00,00,000.
+- **PIN** — 6-digit Postal Index Number in Indian addresses; phones use the +91 country code; timestamps use IST (Asia/Kolkata).
+
+---
+
+---
+
+*Built with LangGraph + AWS Bedrock (Amazon Nova Pro), FastAPI, and React — for the Indian home-loan market (INR ₹, Aadhaar/PAN KYC, RBI-aligned checks).*
