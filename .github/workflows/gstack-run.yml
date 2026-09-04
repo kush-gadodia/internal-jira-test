@@ -284,6 +284,21 @@ jobs:
         with:
           name: gstack-contract
 
+      # gstack's own runtime files (the downloaded contract, the heartbeat
+      # pidfile, the prompts/output this job writes) must never enter the
+      # target repo's history -- `git add -A` below is deliberately broad so
+      # it always picks up whatever the agent changed, and without this it
+      # also picks up these. `.git/info/exclude` (a local-only gitignore,
+      # not committed) is enough since `git add` reads it at add-time.
+      # Confirmed necessary by testing: an earlier run committed these,
+      # which then made a later run's branch-resume checkout below fail with
+      # "untracked working tree files would be overwritten" -- the same
+      # paths existed committed-and-different on the remote branch.
+      - name: Keep gstack's own runtime files out of the repo
+        run: |
+          printf '%s\n' contract.json heartbeat.pid prompt.md agent_output.md \
+            plan_output.md plan_result.json >> .git/info/exclude
+
       - name: Start heartbeat loop
         run: |
           callback_url=$(jq -r .callback.url contract.json)
