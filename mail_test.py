@@ -8,10 +8,12 @@ because your account is still in the SES sandbox.
 
 Run:
     export AWS_REGION=us-east-1
+    export SES_SENDER=you@example.com          # must be a VERIFIED identity
+    export SES_RECIPIENT=someone@example.com   # in sandbox, must ALSO be verified
     # creds resolve from ~/.aws or your current role (PowerUser is fine)
-    python test_ses_send.py
+    python mail_test.py
 
-Expected: prints a MessageId and the mail lands in vaishnavi's inbox.
+Expected: prints a MessageId and the mail lands in the recipient's inbox.
 """
 
 import os
@@ -22,9 +24,9 @@ from email.mime.application import MIMEApplication
 import boto3
 from botocore.exceptions import ClientError
 
-# ---- edit these two if needed ----------------------------------------------
-SENDER    = "tanishq.agarwal@onebyzero.ai"   # must be a VERIFIED identity
-RECIPIENT = "vaishnavi.jha@onebyzero.ai"     # in sandbox, must ALSO be verified
+# ---- configure via environment variables -----------------------------------
+SENDER    = os.environ["SES_SENDER"]      # must be a VERIFIED identity
+RECIPIENT = os.environ["SES_RECIPIENT"]   # in sandbox, must ALSO be verified
 REGION    = os.environ.get("AWS_REGION", "us-east-1")
 # ----------------------------------------------------------------------------
 
@@ -77,7 +79,7 @@ def main() -> None:
                   "production access.")
         elif "Region" in msg_ or code == "InvalidClientTokenId":
             print(f"\n→ Check that both identities are verified in {REGION} "
-                  "and your creds point at the right account (528049652903).")
+                  "and your creds point at the right AWS account.")
 
 
 if __name__ == "__main__":
