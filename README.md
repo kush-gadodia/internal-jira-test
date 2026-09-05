@@ -1,8 +1,20 @@
-# 🏠 HomeLoanAgent
+# 🏠 HomeLoanAgent — Home Loans for India
 
-**An agentic home-loan underwriting system.** Applicants submit their KYC, income, and collateral documents through a web app; a multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline running on **AWS Bedrock (Amazon Nova Pro)** classifies and reads the documents, verifies each fact against external registries, computes the lending math (EMI / LTV / FOIR), reaches an **approve / conditional / decline** decision, and emails the applicant a PDF decision report. Borderline cases are **parked for a human underwriter**, who approves or declines them from an admin console — and the applicant's dashboard updates with the final verdict.
+**An agentic home-loan underwriting system built for the Indian market: Aadhaar/PAN KYC, Indian income proofs, INR (₹) lending math, and India-aligned underwriting guardrails.** Applicants submit their KYC, income, and collateral documents through a web app; a multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline running on **AWS Bedrock (Amazon Nova Pro)** classifies and reads the documents, verifies each fact against external registries, computes the lending math (EMI / LTV / FOIR), reaches an **approve / conditional / decline** decision, and emails the applicant a PDF decision report. Borderline cases are **parked for a human underwriter**, who approves or declines them from an admin console — and the applicant's dashboard updates with the final verdict.
 
 > Looking for the implementation-level story — the exact mechanisms, data shapes, and the *why* behind every design choice? See **[docs/PROJECT_DEEP_DIVE.md](docs/PROJECT_DEEP_DIVE.md)**.
+
+---
+
+## Built for India
+
+This project targets **India** end to end:
+
+- **Currency:** INR (₹) throughout; EMI / LTV / FOIR examples are in ₹.
+- **Identity:** Aadhaar (12-digit) + PAN (5 letters + 4 digits + 1 letter) + DOB, applicant age ≥ 18, age + loan tenure ≤ 60 years.
+- **Income:** Indian income proofs — payslip / bank statement / Form-16 / ITR; employer and existing EMIs are verified against the registry.
+- **Collateral:** Indian property documents — property deed / valuation report / sale agreement; title, encumbrance, and flood-zone flags feed the risk call.
+- **Lending norms:** `8.5%` interest, `MAX_LTV 0.80`, and FOIR bands of `45% / 55%` are India-typical defaults, configurable in code for different Indian lenders/NBFCs.
 
 ---
 
@@ -32,7 +44,7 @@
 
 | Capability | Detail |
 | --- | --- |
-| **Document intake** | Upload identity (Aadhaar/PAN), income (payslip/bank statement/Form-16/ITR), and collateral (property deed/valuation report/sale agreement) documents. |
+| **Document intake** | Upload Indian identity (Aadhaar/PAN), Indian income (payslip/bank statement/Form-16/ITR), and collateral (property deed/valuation report/sale agreement) documents. |
 | **Type gating** | Every upload is classified by an LLM at intake — an unexpected document type (e.g. a payslip in the identity slot) is rejected before it is ever stored. |
 | **Structured extraction** | Bedrock reads each document and extracts typed fields (ID number, DOB, monthly income, property value, …). |
 | **Fact verification** | Extracted facts are cross-checked against mock government/employer/property registries via tool-calling agents (Aadhaar/PAN/DOB; income, employer & existing EMIs; property title & valuation). |
@@ -138,8 +150,8 @@ All thresholds live as named constants next to the code that enforces them.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `ANNUAL_INTEREST_RATE` | `8.5%` | Rate used for the EMI calculation. |
-| `MAX_LTV` | `0.80` | Bank finances at most 80% of the verified property value. |
+| `ANNUAL_INTEREST_RATE` | `8.5%` | Rate used for the EMI calculation (India-typical default). |
+| `MAX_LTV` | `0.80` | Bank finances at most 80% of the verified property value (India-typical default). |
 | Sanctioned amount | `min(requested, MAX_LTV × property_value)` | The principal actually offered. |
 | EMI | standard amortization formula | Over the requested tenure. |
 
@@ -151,7 +163,7 @@ All thresholds live as named constants next to the code that enforces them.
 | 45% – 55% (`FOIR_CONDITIONAL_MAX`) | **conditional** (escalate to a human underwriter) |
 | > 55% | **declined** |
 
-The LLM proposes the decision; a deterministic guardrail then clamps it toward the safer outcome (approved → conditional → declined) so a rare model drift can never over-approve. The model may also *tighten* the call based on collateral flags (a flood-zone flag, an encumbrance, …).
+The LLM proposes the decision; a deterministic guardrail then clamps it toward the safer outcome (approved → conditional → declined) so a rare model drift can never over-approve. The model may also *tighten* the call based on collateral flags (a flood-zone flag, an encumbrance, …). Thresholds are configurable for different Indian lenders/NBFCs.
 
 **Eligibility checks** — [`identity_tools.py`](agent_flow/tools/identity_verification_tools/identity_tools.py): applicant must be **≥ 18**, and **age + loan term ≤ 60 years**.
 
@@ -241,6 +253,8 @@ HomeLoanAgent/
   - **S3** — a bucket for uploaded documents.
   - **DynamoDB** — a table for applications (partition key `application_id`, String).
   - **SES** — a verified sender identity (and verified recipients while in the SES sandbox).
+
+> Note: amounts are in INR (₹) with an Indian locale; Bedrock runs in `us-east-1` (no code change).
 
 > The backend currently hard-codes the S3 bucket, DynamoDB table, and SES sender in [`backend/server.py`](backend/server.py). Update those constants to match your own AWS resources (see [Configuration](#configuration)).
 
@@ -394,7 +408,7 @@ A `processing` record is written **synchronously** at submit time so the applica
 
 ## Mock verification APIs
 
-Verification tools call external mock registries (stand-ins for real government/employer/property data sources). Swap these URLs for real integrations in production:
+Verification tools call external mock registries (stand-ins for Indian registries — UIDAI-like identity, IT/employer income, and land/property records). Swap these URLs for real integrations in production:
 
 | Check | Endpoint | Matches on |
 | --- | --- | --- |
@@ -451,3 +465,4 @@ Recently delivered: **human escalation** for conditional cases (admin approve/de
 ---
 
 *Built with LangGraph + AWS Bedrock (Amazon Nova Pro), FastAPI, and React.*
+*Designed for Indian home-loan underwriting.*
