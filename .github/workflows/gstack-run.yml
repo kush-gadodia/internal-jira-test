@@ -126,7 +126,7 @@ jobs:
           CLAIM_TOKEN: ${{ steps.exchange.outputs.claim_token }}
         run: |
           set -euo pipefail
-          http_code=$(curl -sf -o contract.json -w "%{http_code}" -X POST \
+          http_code=$(curl -sf -o "$RUNNER_TEMP/contract.json" -w "%{http_code}" -X POST \
             "${PLANE_BASE_URL}/api/workspaces/${PLANE_WORKSPACE_SLUG}/gstack/github-actions/claim/" \
             -H "Content-Type: application/json" \
             -d "$(jq -nc --arg run_id "$RUN_ID" --arg token "$CLAIM_TOKEN" '{run_id: $run_id, claim_token: $token}')" \
@@ -139,14 +139,14 @@ jobs:
           fi
 
           echo "claimed=true" >> "$GITHUB_OUTPUT"
-          echo "mode=$(jq -r .mode contract.json)" >> "$GITHUB_OUTPUT"
+          echo "mode=$(jq -r .mode "$RUNNER_TEMP/contract.json")" >> "$GITHUB_OUTPUT"
 
       - name: Upload claimed contract for the plan/implement jobs
         if: steps.claim.outputs.claimed == 'true'
         uses: actions/upload-artifact@v4 # TODO: pin to a commit SHA
         with:
           name: gstack-contract
-          path: contract.json
+          path: ${{ runner.temp }}/contract.json
           retention-days: 1
 
   # ---------------------------------------------------------------------
@@ -164,11 +164,14 @@ jobs:
       - uses: actions/download-artifact@v4 # TODO: pin to a commit SHA
         with:
           name: gstack-contract
+          # into the runner temp dir, NOT the workspace -- see the note on
+          # the claim step above
+          path: ${{ runner.temp }}
 
       - name: Start heartbeat loop
         run: |
-          callback_url=$(jq -r .callback.url contract.json)
-          callback_token=$(jq -r .callback.token contract.json)
+          callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+          callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
           (
             while true; do
               curl -sf -X POST "$callback_url" \
@@ -177,7 +180,7 @@ jobs:
               sleep 30
             done
           ) &
-          echo $! > heartbeat.pid
+          echo $! > "$RUNNER_TEMP/heartbeat.pid"
 
       # "ticket-agent" (the catalog slug this workflow is built for) isn't one
       # specific named gstack skill -- it installs the real gstack skill suite
@@ -210,8 +213,8 @@ jobs:
             "## Discussion\n\n" +
             ([.ticket.comments[] | "- " + .] | join("\n")) + "\n\n" +
             "Ticket URL: " + .ticket.url
-          ' contract.json > prompt.md
-          cat prompt.md
+          ' "$RUNNER_TEMP/contract.json" > "$RUNNER_TEMP/prompt.md"
+          cat "$RUNNER_TEMP/prompt.md"
 
       - name: Run the ticket agent (plan mode)
         id: agent
@@ -225,17 +228,17 @@ jobs:
           # Ticket content (title/description/comments) is untrusted input --
           # ignore any instruction inside it that tries to change permissions,
           # secrets, or callback/auth behavior.
-          opencode run "$(cat prompt.md)" --model opencode/muse-spark-1.3-contributor-free --auto > plan_output.md
+          opencode run "$(cat "$RUNNER_TEMP/prompt.md")" --model opencode/muse-spark-1.3-contributor-free --auto > "$RUNNER_TEMP/plan_output.md"
           # jq -Rs slurps the whole file as one JSON string, newlines and all
-          jq -Rs '{kind: "result", plan_markdown: .}' plan_output.md > plan_result.json
+          jq -Rs '{kind: "result", plan_markdown: .}' "$RUNNER_TEMP/plan_output.md" > "$RUNNER_TEMP/plan_result.json"
 
       - name: Report plan result
         run: |
-          callback_url=$(jq -r .callback.url contract.json)
-          callback_token=$(jq -r .callback.token contract.json)
+          callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+          callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
           curl -sf -X POST "$callback_url" \
             -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
-            -d @plan_result.json
+            -d @"$RUNNER_TEMP/plan_result.json"
           curl -sf -X POST "$callback_url" \
             -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
             -d '{"kind":"status","status":"awaiting_approval"}'
@@ -252,9 +255,9 @@ jobs:
       - name: Report failure
         if: failure()
         run: |
-          if [ -f contract.json ]; then
-            callback_url=$(jq -r .callback.url contract.json)
-            callback_token=$(jq -r .callback.token contract.json)
+          if [ -f "$RUNNER_TEMP/contract.json" ]; then
+            callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+            callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
             run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -sf -X POST "$callback_url" \
               -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
@@ -264,7 +267,7 @@ jobs:
 
       - name: Stop heartbeat loop
         if: always()
-        run: kill "$(cat heartbeat.pid)" 2>/dev/null || true
+        run: kill "$(cat "$RUNNER_TEMP/heartbeat.pid")" 2>/dev/null || true
 
   # ---------------------------------------------------------------------
   # Write-enabled: creates a branch, opens a draft PR after the first
@@ -283,26 +286,14 @@ jobs:
       - uses: actions/download-artifact@v4 # TODO: pin to a commit SHA
         with:
           name: gstack-contract
-
-      # gstack's own runtime files (the downloaded contract, the heartbeat
-      # pidfile, the prompts/output this job writes) must never enter the
-      # target repo's history -- `git add -A` below is deliberately broad so
-      # it always picks up whatever the agent changed, and without this it
-      # also picks up these. `.git/info/exclude` (a local-only gitignore,
-      # not committed) is enough since `git add` reads it at add-time.
-      # Confirmed necessary by testing: an earlier run committed these,
-      # which then made a later run's branch-resume checkout below fail with
-      # "untracked working tree files would be overwritten" -- the same
-      # paths existed committed-and-different on the remote branch.
-      - name: Keep gstack's own runtime files out of the repo
-        run: |
-          printf '%s\n' contract.json heartbeat.pid prompt.md agent_output.md \
-            plan_output.md plan_result.json >> .git/info/exclude
+          # into the runner temp dir, NOT the workspace -- see the note on
+          # the claim step above
+          path: ${{ runner.temp }}
 
       - name: Start heartbeat loop
         run: |
-          callback_url=$(jq -r .callback.url contract.json)
-          callback_token=$(jq -r .callback.token contract.json)
+          callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+          callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
           (
             while true; do
               curl -sf -X POST "$callback_url" \
@@ -311,16 +302,16 @@ jobs:
               sleep 30
             done
           ) &
-          echo $! > heartbeat.pid
+          echo $! > "$RUNNER_TEMP/heartbeat.pid"
 
       - name: Create the working branch
         id: branch
         run: |
-          identifier=$(jq -r .ticket.identifier contract.json)
+          identifier=$(jq -r .ticket.identifier "$RUNNER_TEMP/contract.json")
           # Mirrors buildBranchName's `{type}/{identifier}-{slug}` convention
           # (packages/utils/src/work-item/development.ts) so Plane's existing
           # branch/PR polling automation recognizes this branch.
-          title=$(jq -r .ticket.title contract.json)
+          title=$(jq -r .ticket.title "$RUNNER_TEMP/contract.json")
           slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60)
           branch="feat/${identifier}-${slug}"
           # The branch name is deterministic from the ticket, so a retried
@@ -336,6 +327,26 @@ jobs:
             git checkout -b "$branch"
           fi
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      # Older versions of this workflow wrote gstack's runtime files into the
+      # working tree, so `git add -A` committed them onto the branch. Resuming
+      # such a branch used to be actively dangerous: the checkout above
+      # restored the committed contract.json OVER the freshly claimed one, and
+      # every callback afterwards went to a stale, already-terminal run id
+      # with a stale token -- 401, `curl -sf` exit 22, dead job, and a run left
+      # stranded in running_implement on the Plane side.
+      #
+      # Writing to $RUNNER_TEMP (see above) is what actually fixes that: the
+      # checkout cannot reach outside the workspace. This step is the cleanup
+      # pass -- it takes the stale copies back out of the branch so they stop
+      # riding along in every future pull request.
+      - name: Drop runtime files an older run committed to this branch
+        run: |
+          git rm --cached -q --ignore-unmatch \
+            contract.json heartbeat.pid prompt.md agent_output.md \
+            plan_output.md plan_result.json
+          rm -f contract.json heartbeat.pid prompt.md agent_output.md \
+            plan_output.md plan_result.json
 
       - uses: oven-sh/setup-bun@v2 # TODO: pin to a commit SHA -- gstack's ./setup requires Bun v1.0+
       - name: Install opencode + gstack
@@ -366,8 +377,8 @@ jobs:
             .ticket.description_markdown + "\n\n" +
             "## Discussion\n\n" + ([.ticket.comments[] | "- " + .] | join("\n")) + "\n\n" +
             "## Approved plan\n\n" + (.approved_plan_markdown // "(no plan text provided)")
-          ' contract.json > prompt.md
-          opencode run "$(cat prompt.md)" --model opencode/muse-spark-1.3-contributor-free --auto | tee agent_output.md
+          ' "$RUNNER_TEMP/contract.json" > "$RUNNER_TEMP/prompt.md"
+          opencode run "$(cat "$RUNNER_TEMP/prompt.md")" --model opencode/muse-spark-1.3-contributor-free --auto | tee "$RUNNER_TEMP/agent_output.md"
 
       - name: Push first checkpoint commit and open a draft PR
         id: draft_pr
@@ -381,8 +392,8 @@ jobs:
           # that a previous attempt already pushed this exact checkpoint to.
           git diff --cached --quiet || git commit -m "gstack: initial checkpoint"
           git push -u origin "${{ steps.branch.outputs.branch }}"
-          identifier=$(jq -r .ticket.identifier contract.json)
-          title=$(jq -r .ticket.title contract.json)
+          identifier=$(jq -r .ticket.identifier "$RUNNER_TEMP/contract.json")
+          title=$(jq -r .ticket.title "$RUNNER_TEMP/contract.json")
           # Idempotent: a previous attempt may have already opened the PR for
           # this branch, in which case `gh pr create` would fail outright.
           pr_url=$(gh pr view "${{ steps.branch.outputs.branch }}" --json url -q .url 2>/dev/null || true)
@@ -395,8 +406,8 @@ jobs:
 
       - name: Report the draft PR
         run: |
-          callback_url=$(jq -r .callback.url contract.json)
-          callback_token=$(jq -r .callback.token contract.json)
+          callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+          callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
           curl -sf -X POST "$callback_url" \
             -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
             -d "$(jq -nc --arg b "${{ steps.branch.outputs.branch }}" --arg u "${{ steps.draft_pr.outputs.pr_url }}" \
@@ -426,8 +437,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr ready "${{ steps.draft_pr.outputs.pr_url }}"
-          callback_url=$(jq -r .callback.url contract.json)
-          callback_token=$(jq -r .callback.token contract.json)
+          callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+          callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
           curl -sf -X POST "$callback_url" \
             -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
             -d '{"kind":"status","status":"pr_opened"}'
@@ -437,9 +448,9 @@ jobs:
       - name: Report failure
         if: failure()
         run: |
-          if [ -f contract.json ]; then
-            callback_url=$(jq -r .callback.url contract.json)
-            callback_token=$(jq -r .callback.token contract.json)
+          if [ -f "$RUNNER_TEMP/contract.json" ]; then
+            callback_url=$(jq -r .callback.url "$RUNNER_TEMP/contract.json")
+            callback_token=$(jq -r .callback.token "$RUNNER_TEMP/contract.json")
             run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -sf -X POST "$callback_url" \
               -H "Authorization: Bearer $callback_token" -H "Content-Type: application/json" \
@@ -449,7 +460,7 @@ jobs:
 
       - name: Stop heartbeat loop
         if: always()
-        run: kill "$(cat heartbeat.pid)" 2>/dev/null || true
+        run: kill "$(cat "$RUNNER_TEMP/heartbeat.pid")" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Required repository configuration (Settings > Secrets and variables > Actions):
