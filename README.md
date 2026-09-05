@@ -1,13 +1,21 @@
 # 🏠 HomeLoanAgent
 
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-API-teal) ![LangGraph](https://img.shields.io/badge/LangGraph-agents-purple) ![Bedrock Nova Pro](https://img.shields.io/badge/Bedrock-Nova_Pro-orange) ![React 19](https://img.shields.io/badge/React-19-cyan)
+
+**Built for Indian home loans** — Aadhaar/PAN KYC, payslip / Form-16 / ITR income proofs, INR-first (₹) EMI math, and RBI-style 80% LTV guardrails.
+
 **An agentic home-loan underwriting system.** Applicants submit their KYC, income, and collateral documents through a web app; a multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline running on **AWS Bedrock (Amazon Nova Pro)** classifies and reads the documents, verifies each fact against external registries, computes the lending math (EMI / LTV / FOIR), reaches an **approve / conditional / decline** decision, and emails the applicant a PDF decision report. Borderline cases are **parked for a human underwriter**, who approves or declines them from an admin console — and the applicant's dashboard updates with the final verdict.
 
 > Looking for the implementation-level story — the exact mechanisms, data shapes, and the *why* behind every design choice? See **[docs/PROJECT_DEEP_DIVE.md](docs/PROJECT_DEEP_DIVE.md)**.
+>
+> New here? Start at [Quick start for Indian users](#quick-start-for-indian-users).
 
 ---
 
 ## Table of contents
 
+- [Quick start for Indian users](#quick-start-for-indian-users)
+- [Built for India — documents, checks & math](#built-for-india--documents-checks--math)
 - [What it does](#what-it-does)
 - [Architecture](#architecture)
 - [The agentic pipeline](#the-agentic-pipeline)
@@ -24,7 +32,45 @@
 - [Mock verification APIs](#mock-verification-apis)
 - [Security notes](#security-notes)
 - [Known limitations & assumptions](#known-limitations--assumptions)
+- [Glossary for first-time borrowers](#glossary-for-first-time-borrowers)
 - [Roadmap](#roadmap)
+
+---
+
+## Quick start for Indian users
+
+A 60-second orientation. (Full install steps live under [Setup & installation](#setup--installation) and [Running the system](#running-the-system) — this section is not a duplicate, just the India-specific essentials.)
+
+**Who it's for:** (a) Indian salaried or self-employed applicants trying a home-loan application, (b) underwriters/admins reviewing borderline ("Under Review") cases, (c) developers building for the Indian home-loan context.
+
+**What you need as an Indian applicant:**
+
+- Identity: Aadhaar (**12 digits**) or PAN (**5 letters + 4 digits + 1 letter**, e.g. `ABCDE1234F`).
+- Income (any one): latest payslip, 3-month bank statement, Form-16 (salaried), or ITR (self-employed).
+- Property (any one): sale agreement, title deed, or valuation report.
+
+**Happy path:**
+
+1. Start the backend (`uvicorn server:app --reload --host 127.0.0.1 --port 8000` from `backend/`) and the frontend (`npm run dev` from `frontend/`).
+2. Register — the **first-ever user becomes admin** automatically.
+3. Upload the 3 documents (identity, income, collateral) → submit → poll status until it leaves `processing`.
+
+All amounts and EMIs are in **INR (₹)** throughout the UI, the PDF decision report, and the API.
+
+---
+
+## Built for India — documents, checks & math
+
+The whole domain model is already India-specific. This section names it explicitly.
+
+| Topic | India-specific detail |
+| --- | --- |
+| **KYC** | Aadhaar 12-digit and PAN-format validation, with name/DOB cross-checked against a mock registry (a stand-in for UIDAI/NSDL — **not** a real integration). Submitting *both* Aadhaar and PAN together is on the [Roadmap](#roadmap). |
+| **Income** | Salaried: payslip / Form-16. Self-employed: ITR / bank statement. Employer plus the registry's `existing_obligations` feed FOIR. There is **no CIBIL/bureau pull yet** — FOIR is only as complete as that registry record (see [Known limitations & assumptions](#known-limitations--assumptions)). |
+| **Property** | Sale deed / title / valuation report. Flags such as title-clear, encumbrance, flood-zone, and occupancy feed the risk call and can *tighten* (never loosen) the decision. |
+| **Math in INR (₹)** | Worked example: monthly income **₹1,20,000**, no existing EMIs, property value **₹1.3 Cr**. Sanctioned amount = `min(requested, 0.80 × 1,30,00,000)`; EMI computed @ **8.5%** via the standard amortization formula over the requested tenure; FOIR = `(existing EMIs + proposed EMI) / net monthly income` → **≤45% approve**, **45–55% conditional** (human underwriter), **>55% decline**. Thresholds: see [Decision logic](#decision-logic). |
+| **Eligibility** | Applicant must be **≥ 18**, and **age + loan term ≤ 60 years** — framed as the typical Indian retirement-age cap. |
+| **Communications** | The PDF + email copy is written for Indian applicants (next steps like re-applying with a lower amount, adding a co-applicant, or offering additional collateral). Internal metrics (FOIR, risk score) are never exposed in the applicant email — data minimization by design (see [Security notes](#security-notes)). |
 
 ---
 
@@ -237,10 +283,10 @@ HomeLoanAgent/
 - **Python 3.11+** (the codebase uses `typing.NotRequired`; developed against 3.14).
 - **Node.js 18+** and npm (for the frontend).
 - **An AWS account** with credentials configured (`aws configure` or environment variables) and access to:
-  - **Bedrock** in `us-east-1` with the `amazon.nova-pro-v1:0` model enabled.
+  - **Bedrock** in `us-east-1` with the `amazon.nova-pro-v1:0` model enabled. (Indian deployments typically prefer `ap-south-1` (Mumbai) — update the region constant accordingly.)
   - **S3** — a bucket for uploaded documents.
   - **DynamoDB** — a table for applications (partition key `application_id`, String).
-  - **SES** — a verified sender identity (and verified recipients while in the SES sandbox).
+  - **SES** — a verified sender identity (and verified recipients while in the SES sandbox — this applies to Indian sender/recipient addresses too; sandbox accounts can only mail verified addresses).
 
 > The backend currently hard-codes the S3 bucket, DynamoDB table, and SES sender in [`backend/server.py`](backend/server.py). Update those constants to match your own AWS resources (see [Configuration](#configuration)).
 
@@ -286,6 +332,9 @@ cp .env.example .env               # set VITE_API_BASE if the backend isn't on :
 | `S3_BUCKET` | Bucket where uploaded documents are stored (`applications/{id}/{slot}/...`). |
 | `DDB_TABLE` | DynamoDB table for application records. |
 | `SES_SENDER` / `SES_REGION` | Verified SES sender address and region. |
+| `REVIEWER_EMAIL` | Recipient for manual-review (conditional) notifications — set to the underwriter's inbox. |
+
+Use INR test values from the sample files under `agent_flow/mock_documents/` when exercising the pipeline locally.
 
 ### Backend — environment variables
 
@@ -416,6 +465,7 @@ Responses are cached in-process for 5 minutes. The mock APIs also apply real for
 - **Data minimization in comms**: applicant-facing emails/PDFs are generated in an isolated LLM call that is only given borrower-safe facts — internal metrics (FOIR, risk score) are never exposed to the applicant.
 - **Concurrency-safe manual review**: the admin decision endpoint uses a DynamoDB conditional write so two admins can't both resolve the same application.
 - **Fail-closed** design: missing inputs or agent errors resolve to `incomplete`/`declined`, never a silent approval.
+- **Aadhaar/PAN are sensitive PII**: treat sample and applicant identity documents as such — do not log, email, or commit real ID numbers.
 
 > ⚠️ This is a demonstration/prototype. Before any real use: move hard-coded resource names and the SES sender into configuration; set a persistent `JWT_SECRET_KEY`; keep `users.db`, `jwt_secret.txt`, and `*.tsbuildinfo` out of version control (they are currently tracked); authenticate and add ownership checks to `GET /api/status/{id}`; and replace the mock registries with authorized data sources.
 
@@ -423,7 +473,7 @@ Responses are cached in-process for 5 minutes. The mock APIs also apply real for
 
 ## Known limitations & assumptions
 
-From [`assumptions.txt`](assumptions.txt) and [`todo.txt`](todo.txt):
+From `assumptions.txt` and `todo.txt` (design notes & backlog, where present in the full codebase):
 
 - Assumes clean, well-parsed documents; there is no robust recovery/feedback loop when extraction is poor (a verification → parsing retry loop is planned).
 - No semantic validation of address/phone beyond what parsing yields.
@@ -432,12 +482,28 @@ From [`assumptions.txt`](assumptions.txt) and [`todo.txt`](todo.txt):
 - Documents with expiry semantics (passport/driving licence) are not specially handled.
 - Employment-status casing can be inconsistent depending on extraction.
 - No dedicated security/regression test suite yet.
+- The mock registries are **not** UIDAI / NSDL / ITR / CIBIL / land-registry integrations — demo data must never be used for real underwriting.
+
+---
+
+## Glossary for first-time borrowers
+
+One-line, India-framed definitions. The numbers live in [Decision logic](#decision-logic).
+
+| Term | What it means |
+| --- | --- |
+| **EMI** | Equated Monthly Instalment — the fixed ₹ amount you pay every month, computed @ 8.5% over your tenure via the amortization formula. |
+| **LTV** | Loan-to-Value — `loan ÷ property value`. The bank finances at most **80%** (`MAX_LTV=0.80`), so a ₹1.3 Cr property caps the loan at ₹1.04 Cr. |
+| **FOIR** | Fixed-Obligation-to-Income Ratio — `(existing EMIs + proposed EMI) ÷ net monthly income`. **≤45% approve**, **45–55% conditional**, **>55% decline**. |
+| **Conditional / Under Review** | A borderline FOIR-band outcome meaning a human underwriter must decide — see [Human-in-the-loop review](#human-in-the-loop-review). |
+| **Sanctioned amount vs requested** | Requested is what you asked for; sanctioned is `min(requested, 0.80 × verified property value)` — what the bank actually offers. |
+| **Tenure** | Loan duration in years/months. Combined with your age it must satisfy **age + tenure ≤ 60**. |
 
 ---
 
 ## Roadmap
 
-Planned improvements (see [`todo.txt`](todo.txt)):
+Planned improvements (see `todo.txt`):
 
 - **Verification → parsing feedback loop** so a failed check can tell the parser what to re-extract.
 - **Cheap-model classifier, costly-model extractor** split to cut cost.
@@ -450,4 +516,4 @@ Recently delivered: **human escalation** for conditional cases (admin approve/de
 
 ---
 
-*Built with LangGraph + AWS Bedrock (Amazon Nova Pro), FastAPI, and React.*
+*Built with LangGraph + AWS Bedrock (Amazon Nova Pro), FastAPI, and React. Made for the Indian home-loan journey.*
