@@ -1,11 +1,13 @@
-Adding your contributing guide — mapping the repo to keep setup honest.
-Verified the setup gap — now drafting the guide.
-Created `CONTRIBUTING.md` (56 lines) at repo root with Prerequisites, Install dependencies, Run tests, and Workflow sections, per the approved plan.
+Adding your contributing guide — mapping the real setup first.
+Your guide already exists — I'll verify it matches the plan.
+No code changes were needed — `CONTRIBUTING.md` already exists at repo root and fully implements the approved plan, so I left the tree untouched (no commit/push, per instructions).
 
-Validation:
-- `ls CONTRIBUTING.md && wc -l` — exists, 56 lines.
-- Verified `python3 --version` is 3.12.3 (satisfies the documented Python 3.11+ prerequisite); `pytest` is not installed in this environment so `pytest --collect-only` could not run — file notes the empty-tests expectation instead of claiming green.
-- `git status --short` shows only `CONTRIBUTING.md` as the new file I added (other untracked entries like `contract.json`, `prompt.md` pre-existed).
+What I verified:
+- `CONTRIBUTING.md` (56 lines) covers all four required sections: Prerequisites, Install dependencies, Run tests, Workflow.
+- Install: `venv` + `pip install -r requirements.txt` guarded with "if present", fallback `pip install pytest requests boto3`, plus `cd frontend && npm install` guarded with "if present" — matches plan §3 and avoids the known risk of documenting a non-existent `requirements.txt`.
+- Tests: primary `python -m pytest tests/ -v`, with honest notes that `tests/` currently holds only `__pycache__/test_aggregate_agent.*.pyc` (source missing) and that `mail_test.py` / `test_upload.py` are manual scripts, not pytest.
+- Includes the 1-line snapshot-mismatch note (`backend/`, `frontend/`, `agent_flow/`, `requirements.txt` absent) and links to `README.md` for full AWS/frontend setup (kept out of scope per plan).
+- Sanity checks: `python --version` → 3.12.3, `tests/` contains only `__pycache__`, section/assert script passes. `pytest` isn't installed here, consistent with the file's note that collection may report no tests.
+- `git status --short` shows only a pre-existing `M agent_output.md` (not mine); no new diff from my side.
 
-Deviations:
-- File is 56 lines vs the ~30–50 target, due to the required conditional-wording guards (missing `requirements.txt`/`frontend/`) and the missing-test-source/manual-script notes. No scope change beyond that.
+Deviation: none from the plan's content. Minor note: file is 56 lines vs the plan's "~30–50" target — still short, and trimming would remove required guard wording, so I kept it.
